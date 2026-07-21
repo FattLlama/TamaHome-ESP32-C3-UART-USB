@@ -1,0 +1,82 @@
+#include <Arduino.h>
+
+#include <fcntl.h>
+#include <stdio.h>
+
+#include "driver/uart.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "sdkconfig.h"
+
+#include "usb_direct.h"
+
+
+#define UBRIDGE_PIN_TXD         4
+#define UBRIDGE_PIN_RXD         5
+#define UBRIDGE_PIN_RTS         UART_PIN_NO_CHANGE
+#define UBRIDGE_PIN_CTS         UART_PIN_NO_CHANGE
+#define UBRIDGE_UART_PORT_NUM   1
+#define UBRIDGE_UART_BAUD_RATE  460800
+
+#define USB_READ_CHUNK_SIZE 64
+
+void usb2uart_task(void* pvParameters) {
+    uint8_t buf[USB_READ_CHUNK_SIZE];
+
+    while (true) {
+        int rx = usb_read(buf, sizeof(buf));
+        //ESP_LOGI("USB->UART", "Read %d bytes", rx);
+        if (rx > 0) {
+            uart_write_bytes(UBRIDGE_UART_PORT_NUM, buf, rx);
+            uart_flush(UBRIDGE_UART_PORT_NUM);
+        }
+
+        vTaskDelay(1); // minimal yield for watchdog
+    }
+}
+
+void uart2usb_task(void* pvParameters) {
+    uint8_t buf[USB_READ_CHUNK_SIZE];
+
+    while (true) {
+        int rx = uart_read_bytes(UBRIDGE_UART_PORT_NUM, buf, sizeof(buf), 10 / portTICK_PERIOD_MS);
+        //ESP_LOGI("UART->USB", "Read %d bytes", rx);
+        usb_write(buf, rx);
+
+        vTaskDelay(1); // minimal yield for watchdog
+    }
+}
+
+void setup() {
+    uart_config_t uart_config = {
+            .baud_rate = UBRIDGE_UART_BAUD_RATE,
+            .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .source_clk = UART_SCLK_XTAL,
+    };
+
+    ESP_ERROR_CHECK(uart_driver_install(UBRIDGE_UART_PORT_NUM, 256, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UBRIDGE_UART_PORT_NUM, &uart_config));
+    ESP_ERROR_CHECK(uart_set_pin(UBRIDGE_UART_PORT_NUM, 
+                                 UBRIDGE_PIN_TXD,
+                                 UBRIDGE_PIN_RXD,
+                                 UBRIDGE_PIN_RTS,
+                                 UBRIDGE_PIN_CTS));
+
+    ESP_LOGI("Bridge", "UART Port %d, GPIO: Rx %d, Tx %d", 
+        UBRIDGE_UART_PORT_NUM, 
+        UBRIDGE_PIN_RXD, 
+        UBRIDGE_PIN_TXD);
+
+    ESP_LOGI("Bridge", "UART Baudrate %d, Data bits 8, Parity None, Stop bits 1",
+        UBRIDGE_UART_BAUD_RATE);
+
+    xTaskCreate(uart2usb_task, "uart->usb", 4096, NULL, 1, NULL);
+    xTaskCreate(usb2uart_task, "usb->uart", 4096, NULL, 1, NULL);
+}
+void loop() {
+    // Keep loop empty or add a delay so it doesn't starve lower-priority tasks
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
